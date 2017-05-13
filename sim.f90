@@ -3,8 +3,8 @@ module sim
     implicit none
 
     private GC, PrintToFile, Print2ColReal, PrintDoubleToFile, PrintInteger, PrintReal,&
-        SSDDWF, SSDHCWF, SSDDWFTrace, SSDHCWFTrace
-    public SSDDWFRuns, SSDHCWFRuns, SSDDWFTraceRuns, SSDHCWFTraceRuns
+        SSDDWF, SSDHCWF, SSDDWFTrace, SSDHCWFTrace, SSDCOLDDCHTrace
+    public SSDDWFRuns, SSDHCWFRuns, SSDDWFTraceRuns, SSDHCWFTraceRuns, SSDCOLDDCHTraceRuns
 
     contains
 
@@ -163,6 +163,44 @@ module sim
             GC=dVec(i)
         end if
     end function GC
+    
+    !Special GC for Hot/Cold data
+    ! This tries to limit the amount of hot->cold block conversions.
+    ! Rationale: Spread same amount of hot data, across as many blocks as possible.
+    function GCCOLD(rng,d,N,validPages, hotness, hotvalue, replacingCWF)
+        use rng, only : rng_t, randid
+
+        integer :: i,GCCOLD
+        !integer, save:: fifoCtr=1 !! Static variable
+        type(rng_t), intent(inout) :: rng
+        integer, intent(in)::d,N, hotvalue
+        integer, dimension(1:N), intent(in) :: validPages, hotness
+        integer,dimension(1:d):: dVec, dValid
+        logical, intent(in) :: replacingCWF
+        
+        if(replacingCWF) then !Special behavior
+            !! DChoices
+            !!TODO: Assume DChoices for now, but enable in future
+            call randid(rng, N, dVec)
+            dValid=validPages(dVec)
+            !Assume b<N, so validPages would never be as much as N; sidestepping a need to pass value of b to this function.
+            ! Matlab equivalent: dValid(hotness(dVec) == hotvalue) = N
+            do i=1,d
+                if(hotness(dVec(i)) == hotValue) then
+                    dValid(i) = N
+                end if
+            end do
+            !Re-use i to find location of minimum
+            i=minloc(dValid,1)
+            if(dValid(i) == N) then ! No cold blocks in this batch :(
+                GCCOLD=dVec(minloc(validPages(dVec),1))
+            else ! Found cold block!
+                GCCOLD=dVec(i)
+            end if
+        else !Replacing hot WF, no difference, so just pass everything
+            GCCOLD = GC(rng,d,N,validPages)
+        end if
+    end function GCCOLD
 
     subroutine SSDDWF(N,b,d,rho,r,f,maxPE,runit, rng,initrandom)
         use rng, only: rng_t, randi, rng_uniform
@@ -1532,6 +1570,583 @@ module sim
             end do
             !!$OMP END PARALLEL DO
     end subroutine SSDHCWFTraceRuns
+
+    subroutine SSDCOLDDCHTrace(traceid,maxLBA, b,d,rho,f,maxPE,numreq,requests,runit,rng, initrandom)
+        use rng, only: rng_t, randi, rng_uniform
+
+        integer, parameter :: hotsections=1000, testhotnesscount = 1000
+        integer, parameter :: numhotgcbins=12
+        integer, parameter :: hotBlock=1, coldBlock=0
+        type(rng_t), intent(inout) :: rng
+        character(4) :: traceid
+        integer, intent(in):: maxLBA,b,d,maxPE,runit, numreq
+        integer, intent(in), dimension(1:numreq,1:2) ::requests
+        real(dp), intent(in) :: rho,f
+        logical, intent(in), optional :: initrandom
+
+        real(dp), allocatable, dimension(:) :: dist
+        real(dp), dimension(0:maxPE) :: endurance, fairness, hotblf,coldblf,hotpgf,coldpgf
+        real(dp), dimension(0:b) :: validdist
+        integer(8), dimension(0:b*(b+1)) :: victimhotness, transientdist
+
+        integer :: N,p,bl,it,hotness,i,j,jst,k,lpn,victim,maxnumvalid,kdiff,maxnumhot,&
+                    distL, distU,distit,maxit,temphot,temphotindex,&
+                    gccalls,numgccalls,currentPE,sumPE,testhotnessinterval,&
+                    bi,bj,hotj,hotk,maxhotbl,same, other, binID,numhotgccalls,interhotvictim
+        integer(8) :: intW, extW, numreqlong, reqit
+        integer, allocatable, dimension(:):: PE,validPages, blockhotness
+        integer, dimension(1:b) :: victimcontent
+        integer, dimension(0:1) :: WF, WFindex
+        integer, dimension(0:b) :: victimValids
+        integer, dimension(0:numhotgcbins-1) :: interhotvictimlim,interhotvictimbins
+        integer, allocatable, dimension(:,:):: FTL, SSD
+        character(len=64) :: distfilename,endufilename, fairfilename,&
+                        validfilename,WFEhfilename,WFIhfilename,victimfilename, &
+                        victimhotfilename,transientdistfilename,WAfilename,&
+                        hotvicfreqfilename, interhotvicfilename,coldpgffilename,&
+                        hotblffilename, coldblffilename, hotpgffilename
+
+        real(dp) :: pageCount, hotGCfreq, WA
+        logical :: failure, metrics, isWrite
+
+        numreqlong=numreq
+
+        N=ceiling(dble(maxLBA)/(b*rho))
+        maxit=N*maxPE
+        pageCount=dble(b*N)
+        maxnumvalid=maxLBA
+        testhotnessinterval=maxit/testhotnesscount
+
+        !! Initialize
+        allocate(FTL(1:maxnumvalid,1:2))
+        allocate(PE(1:N))
+        allocate(validPages(1:N))
+        allocate(blockhotness(1:N))
+        allocate(SSD(1:b,1:N))
+
+        SSD=0
+        FTL=0
+        maxnumhot=floor(f*maxLBA)
+        maxhotbl=ceiling(f*N)
+        WF(0)=maxhotbl+1 !CWF
+        WF(1)=1 !HWF
+        WFindex=0
+        victimValids=0
+        validPages=0
+        blockhotness(1:maxhotbl)=1
+        blockhotness(maxhotbl+1:N)=0
+
+        reqit=0
+        !!TODO: Assume we initialize randomly; it doesn't really matter anyway
+        !if( present(initrandom) .and. initrandom) then
+            do it=1, maxnumvalid
+                failure=.true.
+                do while(failure)
+                    p=randi(rng,b)
+                    if(it <= maxnumhot) then
+                        bl=randi(rng,maxhotbl)
+                    else
+                        bl=maxhotbl+randi(rng,N-maxhotbl)
+                    end if
+                    if(SSD(p,bl) <= 0) then
+                        if(all(WF /= bl) ) then
+                            SSD(p,bl) = it
+                            FTL(it,:)=(/p,bl/)
+                            failure=.false.
+                        else
+                            if(it <= maxnumhot) then
+                                hotness=hotBlock
+                            else
+                                hotness=coldBlock
+                            end if
+                            if(WFindex(hotness) < b) then
+                                WFindex(hotness)=WFindex(hotness)+1
+                                FTL(it, :) =(/ WFindex(hotness), WF(hotness)/)
+                                SSD(WFindex(hotness),WF(hotness))=it
+                                failure=.false.
+                            end if
+                        end if
+                    end if
+                end do
+            end do
+            validPages = count(SSD > 0, 1)
+        !else
+        !    !! Warmup with trace
+        !    do while(sum(validPages) <  maxnumvalid)
+        !        do while(all(WFindex < b))
+        !            reqit=reqit+1
+        !            reqit=mod(reqit-1,numreqlong)+1
+        !            lpn=requests(mod(reqit, numreqlong)+1,1)
+        !            isWrite=requests(mod(reqit, numreqlong)+1,2) /= 0
+        !            p=FTL(lpn,1)
+        !            bl=FTL(lpn,2)
+        !
+        !            if(lpn <= maxnumhot) then
+        !                hotness=hotBlock
+        !            else
+        !                hotness=coldBlock
+        !            end if
+        !            if(isWrite) then
+        !                WFindex(hotness)=WFindex(hotness)+1
+        !                if(p /= 0) then ! Invalidate if valid page
+        !                    ! Remove old page
+        !                    SSD(p,bl) = 0
+        !                    validPages(bl)=validPages(bl)-1
+        !                end if
+        !                ! Write update to WFE
+        !                FTL(lpn, 1:2) =(/ WFindex(hotness), WF(hotness)/)
+        !                SSD(WFindex(hotness),WF(hotness))=lpn
+        !                validPages(WF(hotness))=validPages(WF(hotness))+1
+        !
+        !                intW=intW+1
+        !                extW=extW+1
+        !            else if (p /= 0) then ! TRIM
+        !                SSD(p,bl) = 0
+        !                validPages(bl)=validPages(bl)-1
+        !                FTL(lpn, 1:2) =(/0, 0/)
+        !            end if
+        !        end do ! (WFvalid < b)
+        !
+        !        !! GCA invocation
+        !        failure=.true.
+        !
+        !        do while(failure)
+        !            if(WFindex(0) == b) then
+        !                same=0
+        !                other=1
+        !            else
+        !                same=1
+        !                other=0
+        !            end if
+        !
+        !            validPages(WF)=b+1
+        !            victim=GC(rng,d,N,validPages)
+        !            validPages(WF)=count(SSD(:,WF) > 0, 1)
+        !            if(all(victim /= WF)) then
+        !                j=validPages(victim)
+        !
+        !                jst=WFindex(other)! Not equal to validPages(WF(other)), because incoming requests can invalidate in WFI
+        !
+        !                k=b-jst !Free in WFI
+        !                victimcontent=SSD(1:b,victim)
+        !
+        !                !! Erase victim
+        !                SSD(:,victim)=0
+        !                validPages(victim)=0
+        !
+        !                if(blockhotness(victim) == same) then
+        !                    WF(same)=victim
+        !                    WFindex(same)=0
+        !                    do i=1,b
+        !                        lpn=victimcontent(i)
+        !                        if(lpn /= 0) then
+        !                            WFindex(same)=WFindex(same)+1
+        !                            FTL(lpn,:)=(/WFindex(same), WF(same)/)
+        !                            SSD(WFindex(same),WF(same))=lpn
+        !                        end if
+        !                    end do
+        !
+        !                    validPages(WF(same))=j
+        !                    failure=.false.
+        !                elseif(j <= k) then ! Cold victim, sufficient space in CWF
+        !                    !Copy to CWF
+        !                    do i=1,b
+        !                        lpn=victimcontent(i)
+        !                        if(lpn /= 0) then
+        !                            WFindex(other)=WFindex(other)+1
+        !                            FTL(lpn,:)=(/WFindex(other), WF(other)/)
+        !                            SSD(WFindex(other),WF(other))=lpn
+        !                        end if
+        !                    end do
+        !                    validPages(WF(other))=validPages(WF(other))+j
+        !                    !No modifications for (hot)validPages necessary here
+        !                    validPages(victim)=0
+        !
+        !                    ! HWF <- victim
+        !                    WF(same) = victim
+        !                    blockhotness(WF(same))=same
+        !                    WFindex(same)=0
+        !                    failure=.false.
+        !                else ! j > k
+        !                    ! Copy k of j to CWF, rest to self
+        !                    kdiff=k
+        !                    if(kdiff == 0) then !Turns 0 for first time
+        !                        WFindex(other) = 0 ! WFIindex remains between GCA invocations, only reset here
+        !                    end if
+        !
+        !                    do i=1,b
+        !                        lpn=victimcontent(i)
+        !                        if(lpn /= 0) then
+        !                            WFindex(other) = WFindex(other)+1
+        !                            if (kdiff == 0) then ! No space on WFI, copy back to self
+        !                                SSD(WFindex(other),victim)=lpn
+        !                                FTL(lpn,:)=(/WFindex(other),victim/)
+        !                            else ! (kdiff > 0) !Copy to WFI
+        !                                SSD(WFindex(other),WF(other))=lpn
+        !                                FTL(lpn,:)=(/WFindex(other), WF(other)/)
+        !
+        !                                kdiff=kdiff-1
+        !                                if(kdiff == 0) then !Turns 0 for first time
+        !                                    WFindex(other) = 0 ! WFIindex remains between GCA invocations, only reset here
+        !                                end if
+        !                            end if
+        !                        end if !(lpn /= 0)
+        !                    end do !(i=1,b)
+        !                    validPages(victim)=j-k !This is done local (during GC), so this always holds true (even if requests for pages in WFI and WFE)
+        !                    validPages(WF(other))=validPages(WF(other))+k ! Old WF(other) filled completely during loop
+        !
+        !                    WF(other) = victim
+        !                    blockhotness(WF(other))=other
+        !                end if
+        !            end if !(victim /= WFE,WFI)
+        !        end do !(failure)
+        !    end do !(sum(validPages) < maxnumvalid)
+        !
+        !end if
+
+        !Reset metrics
+        it=0
+        currentPE=0
+        intW=0
+        extW=0
+        PE=0
+        sumPE=sum(PE)
+        fairness=0.0_dp
+        endurance=0.0_dp
+        numgccalls =0
+        victimhotness=0
+        transientdist=0
+        reqit=0
+        hotpgf(currentPE)=count(FTL(1:maxnumhot,1) /= 0)
+        hotblf(currentPE)=count(blockhotness == 1)
+        coldpgf(currentPE)=count(FTL(maxnumhot+1:maxnumvalid,1) /= 0)
+        coldblf(currentPE)=N-hotblf(currentPE)
+
+        numhotgccalls=0
+        interhotvictim=0! Time between choosing Hot victim blocks
+        !Upper limits of items in bin
+        do distit=0,numhotgcbins-2
+            interhotvictimlim(distit)=distit!5*distit
+        end do ! (distit=0,numhotgcbins-2)
+        interhotvictimlim(numhotgcbins-1)=0 !Actually infinity
+        interhotvictimbins=0
+
+        !! Simulation
+        do while(currentPE < maxPE .or. it <= maxit)
+            do while(all(WFindex < b))
+                reqit=reqit+1
+                reqit=mod(reqit-1,numreqlong)+1
+
+                lpn=requests(mod(reqit, numreqlong)+1,1)
+                isWrite=requests(mod(reqit, numreqlong)+1,2) /= 0
+                p=FTL(lpn,1)
+                bl=FTL(lpn,2)
+
+                if(lpn <= maxnumhot) then
+                    hotness=hotBlock
+                else
+                    hotness=coldBlock
+                end if ! (lpn <= maxnumhot)
+
+                if (isWrite) then
+                    WFindex(hotness)=WFindex(hotness)+1
+                    if (p /= 0) then ! Invalidate if valid page
+                        ! Remove old page
+                        SSD(p,bl) = 0
+                        validPages(bl)=validPages(bl)-1
+                    end if
+                    ! Write update to WFE
+                    FTL(lpn, 1:2) =(/ WFindex(hotness), WF(hotness)/)
+                    SSD(WFindex(hotness),WF(hotness))=lpn
+                    validPages(WF(hotness))=validPages(WF(hotness))+1
+
+                    intW=intW+1
+                    extW=extW+1
+                else if (p /= 0) then ! TRIM
+                    SSD(p,bl) = 0
+                    validPages(bl)=validPages(bl)-1
+                    FTL(lpn, 1:2) =(/0, 0/)
+                end if ! (isWrite)
+            end do !(WFvalid < b)
+
+            !! GCA invocation
+            gccalls=0
+            failure=.true.
+
+            do while(failure)
+                if(WFindex(coldBlock) == b) then
+                    same=coldBlock
+                    other=hotBlock
+                else
+                    same=hotBlock
+                    other=coldBlock
+                end if ! (WFindex(0) == b)
+
+                validPages(WF)=b+1
+                !victim=GC(rng,d,N,validPages)
+                victim=GCCOLD(rng, d, N, validPages, blockhotness, hotBlock, same == coldBlock)
+                !!TODO: Bookkeep how many times we select a cold victim/convert a block?
+                validPages(WF)=count(SSD(:,WF) > 0, 1)
+
+                if(all(victim /= WF)) then
+                    if(PE(victim) == currentPE .and. currentPE < maxPE) then
+                        currentPE=currentPE+1
+
+                        fairness(currentPE)=sum(PE)/dble(N*currentPE)
+                        endurance(currentPE)=dble(extW)/pageCount
+                        hotpgf(currentPE)=count(FTL(1:maxnumhot,1) /= 0)
+                        hotblf(currentPE)=count(blockhotness == 1)
+                        coldpgf(currentPE)=count(FTL(maxnumhot+1:maxnumvalid,1) /= 0)
+                        coldblf(currentPE)=N-hotblf(currentPE)
+                    end if ! (PE(victim) == currentPE .and. currentPE < maxPE)
+
+                    it=it+1
+
+                    if (it == maxit) then
+                        !! Stats at end of run
+                        distL=minval(PE)
+                        distU=maxval(PE)
+                        allocate(dist(distL:distU))
+                        dist(distL)=count(PE==distL)
+                        do distit=distL+1,distU
+                            dist(distit)=dist(distit-1)+count(PE == distit)
+                        end do ! (distit=distL+1,distU)
+                        dist=dist/N
+
+                        do distit=0,b
+                            validdist(distit)=count(validPages == distit)
+                        end do ! (distit=0.b)
+                        validdist=validdist/N
+
+                        it=maxit+1 !make sure this does not happen again
+                    end if !(it == maxit)
+
+                    if(blockhotness(victim) == 1) then
+                        numhotgccalls = numhotgccalls +1
+                        !Determine correct bin
+                        binID=numhotgcbins-1
+                        do distit=0,numhotgcbins-2
+                            if(interhotvictim <= interhotvictimlim(distit)) then
+                                binID=distit
+                                exit ! Exit out of loop
+                            end if ! (interhotvictim <= interhotvictimlim(distit))
+                        end do ! (distit=0,numhotgcbins-2)
+                        interhotvictimbins(binID)&
+                                        =interhotvictimbins(binID)+1
+                        !Reset timer
+                        interhotvictim=0
+                    else
+                        !Not yet chosen hot victim, so increase "timer"
+                        interhotvictim=interhotvictim+1
+                    end if ! (blockhotness(victim) == 1)
+
+
+                    j=validPages(victim)
+                    victimValids(j)=victimValids(j)+1
+
+                    jst=WFindex(other) ! Not equal to validPages(WF(other)), because incoming requests can invalidate in WFI
+                    gccalls=gccalls+1
+
+                    k=b-jst !Free in WFI
+                    victimcontent=SSD(1:b,victim)
+
+                    !! Erase victim
+                    SSD(:,victim)=0
+                    validPages(victim)=0
+
+                    if(blockhotness(victim) == same) then
+                        WF(same)=victim
+                        WFindex(same)=0
+                        do i=1,b
+                            lpn=victimcontent(i)
+                            if(lpn /= 0) then
+                                WFindex(same)=WFindex(same)+1
+                                FTL(lpn,:)=(/WFindex(same), WF(same)/)
+                                SSD(WFindex(same),WF(same))=lpn
+                                intW=intW+1
+                            end if ! (lpn /= 0)
+                        end do ! (i=1,b)
+
+                        validPages(WF(same))=j
+
+                        failure=.false.
+
+                    elseif(j <= k) then ! Cold victim, sufficient space in CWF
+
+                        !Copy to CWF
+                        do i=1,b
+                            lpn=victimcontent(i)
+                            if(lpn /= 0) then
+                                WFindex(other)=WFindex(other)+1
+                                FTL(lpn,:)=(/WFindex(other), WF(other)/)
+                                SSD(WFindex(other),WF(other))=lpn
+                                intW=intW+1
+                            end if
+                        end do
+                        validPages(WF(other))=validPages(WF(other))+j
+                        !No modifications for (hot)validPages necessary here
+                        validPages(victim)=0
+
+                        ! HWF <- victim
+                        WF(same) = victim
+                        blockhotness(WF(same))=same
+                        WFindex(same)=0
+
+                        failure=.false.
+
+                    else ! j > k
+
+                        ! Copy k of j to CWF, rest to self
+                        kdiff=k
+                        if(kdiff == 0) then !Turns 0 for first time
+                            WFindex(other) = 0 ! WFIindex remains between GCA invocations, only reset here
+                        end if ! (kdiff == 0)
+
+                        do i=1,b
+                            lpn=victimcontent(i)
+                            if(lpn /= 0) then
+                                WFindex(other) = WFindex(other)+1
+                                if (kdiff == 0) then ! No space on WFI, copy back to self
+                                    SSD(WFindex(other),victim)=lpn
+                                    FTL(lpn,:)=(/WFindex(other),victim/)
+                                else ! (kdiff > 0) !Copy to WFI
+                                    SSD(WFindex(other),WF(other))=lpn
+                                    FTL(lpn,:)=(/WFindex(other), WF(other)/)
+
+                                    kdiff=kdiff-1
+                                    if(kdiff == 0) then !Turns 0 for first time
+                                        WFindex(other) = 0 ! WFIindex remains between GCA invocations, only reset here
+                                    end if ! (kdiff == 0)
+                                end if ! (kdiff == 0)
+                                intW=intW+1
+                            end if ! (lpn /= 0)
+                        end do ! (i=1,b)
+                        validPages(victim)=j-k ! This is done local (during GC), so this always holds true (even if requests for pages in WFI and WFE)
+                        validPages(WF(other))=validPages(WF(other))+k ! Old WF(other) filled completely during loop
+
+                        WF(other) = victim
+                        blockhotness(WF(other))=other
+                    end if ! (blockhotness(victim) == same)
+
+                    !! PE cycle on victim
+                    PE(victim)=PE(victim)+1
+                    sumPE=sumPE+1
+                end if ! (victim /= WFE,WFI)
+            end do ! (failure)
+
+            numgccalls=numgccalls+gccalls
+
+        end do !(currentPE < maxPE .or. it < maxit)
+        WA=dble(intW)/dble(extW)
+
+        hotGCfreq=dble(numhotgccalls)/numgccalls
+
+
+        if(present(initrandom) .and. initrandom) then
+            write (WAfilename,        20)    b,d,rho,f,traceid,runit
+            write (distfilename,      21)    b,d,rho,f,traceid,runit
+            write (fairfilename,      22)    b,d,rho,f,traceid,runit
+            write (endufilename,      23)    b,d,rho,f,traceid,runit
+            write (victimfilename,    24)    b,d,rho,f,traceid,runit
+            write (victimhotfilename, 25)    b,d,rho,f,traceid,runit
+            write (hotvicfreqfilename, 26)   b,d,rho,f,traceid,runit
+            write (interhotvicfilename,27)   b,d,rho,f,traceid,runit
+            write (validfilename,      28)   b,d,rho,f,traceid,runit
+            write (hotblffilename,     29)   b,d,rho,f,traceid,runit
+            write (coldblffilename,    30)   b,d,rho,f,traceid,runit
+            write (hotpgffilename,     31)   b,d,rho,f,traceid,runit
+            write (coldpgffilename,    32)   b,d,rho,f,traceid,runit
+        else
+            write (WAfilename,         40)   b,d,rho,f,traceid,runit
+            write (distfilename,       41)   b,d,rho,f,traceid,runit
+            write (fairfilename,       42)   b,d,rho,f,traceid,runit
+            write (endufilename,       43)   b,d,rho,f,traceid,runit
+            write (victimfilename,     44)   b,d,rho,f,traceid,runit
+            write (victimhotfilename,  45)   b,d,rho,f,traceid,runit
+            write (hotvicfreqfilename, 46)   b,d,rho,f,traceid,runit
+            write (interhotvicfilename,47)   b,d,rho,f,traceid,runit
+            write (validfilename,      48)   b,d,rho,f,traceid,runit
+            write (hotblffilename,     49)   b,d,rho,f,traceid,runit
+            write (coldblffilename,    50)   b,d,rho,f,traceid,runit
+            write (hotpgffilename,     51)   b,d,rho,f,traceid,runit
+            write (coldpgffilename,    52)   b,d,rho,f,traceid,runit
+        end if ! (present(initrandom) .and. initrandom)
+
+        call PrintToFile (WAfilename,    (/WA/), 1, 1)
+        call PrintToFile (distfilename,  dist, distL, distU)
+        call PrintToFile (fairfilename,  fairness, 0, maxPE)
+        call PrintToFile (endufilename,  endurance, 0, maxPE)
+        call PrintInteger(victimfilename,  victimValids, 0, b)
+        call PrintReal   (victimhotfilename,  victimhotness/dble(maxit), 0, b*(b+1))
+        call PrintToFile (hotvicfreqfilename,  (/hotGCfreq/),    1, 1)
+        call PrintInteger(interhotvicfilename,  interhotvictimbins, 0, numhotgcbins-1)
+        call PrintReal   (validfilename, validdist, 0,b)
+        call PrintToFile (hotblffilename,  hotblf,    0, maxPE)
+        call PrintToFile (coldblffilename, coldblf, 0, maxPE)
+        call PrintToFile (hotpgffilename, hotpgf, 0, maxPE)
+        call PrintToFile (coldpgffilename, coldpgf, 0, maxPE)
+
+        deallocate(FTL)
+        deallocate(validPages)
+        deallocate(PE)
+        deallocate(SSD)
+        deallocate(dist)
+
+        20  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-WA.',I2,'.csv')
+        21  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-dist.',I2,'.csv')
+        22  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-fair.',I2,'.csv')
+        23  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-end.',I2,'.csv')
+        24  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-victim.',I2,'.csv')
+        25  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-victimh.',I2,'.csv')
+        26  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-hotGCf.',I2,'.csv')
+        27  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-inter.',I2,'.csv')
+        28  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-valid.',I2,'.csv')
+        29  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-hotblf.',I2,'.csv')
+        30  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-coldblf.',I2,'.csv')
+        31  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-hotpgf.',I2,'.csv')
+        32  format('coldtrace-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-coldpgf.',I2,'.csv')
+
+        40  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-WA.',I2,'.csv')
+        41  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-dist.',I2,'.csv')
+        42  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-fair.',I2,'.csv')
+        43  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-end.',I2,'.csv')
+        44  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-victim.',I2,'.csv')
+        45  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-victimh.',I2,'.csv')
+        46  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-hotGCf.',I2,'.csv')
+        47  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-inter.',I2,'.csv')
+        48  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-valid.',I2,'.csv')
+        49  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-hotblf.',I2,'.csv')
+        50  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-coldblf.',I2,'.csv')
+        51  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-hotpgf.',I2,'.csv')
+        52  format('coldtrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-coldpgf.',I2,'.csv')
+
+    end subroutine SSDCOLDDCHTrace
+
+    subroutine SSDCOLDDCHTraceRuns(traceid,startrun,nruns,b,d,rho,f,maxPE,numreq, requests, initrandom)
+            use utils, only : dp
+            use rng, only : rng_seed, rng_t
+
+            integer, intent(in) :: nruns,b,d,maxPE, numreq, startrun
+            character(4), intent(in):: traceid
+            real(dp), intent(in) :: rho,f
+            logical, intent(in) :: initrandom
+            integer, dimension(1:numreq,1:2), intent(in):: requests
+
+            integer :: it, maxLBA
+            type(rng_t), dimension(1:nruns) :: rng
+
+            maxLBA=maxval(requests)
+            print *, maxLBA, ceiling(dble(maxLBA)/(b*rho))
+
+            !!$OMP PARALLEL DO
+            do it=1,nruns
+                call rng_seed(rng(it), 932117 + it +startrun-1)
+                call SSDCOLDDCHTrace(traceid, maxLBA, b,d,rho,f,maxPE,numreq,requests,it +startrun-1,rng(it), initrandom)
+                print *, "done ", it +startrun-1
+            end do
+            !!$OMP END PARALLEL DO
+    end subroutine SSDCOLDDCHTraceRuns
+
 
 
     subroutine SSDHCWF(N,b,d,rho,r,f,maxPE,runit, rng,initrandom)
