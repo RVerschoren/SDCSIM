@@ -1,7 +1,7 @@
 program SimDWFTrace
 
     use utils, only : dp
-    use sim, only : SSDDWFTraceRuns
+    use dwfsim, only : SSDDWFTraceRuns
     implicit none
 
     integer, parameter :: H=2

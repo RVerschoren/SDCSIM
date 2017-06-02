@@ -3,7 +3,142 @@ module utils
     integer, parameter:: dp=kind(0.0d0)
 
     private
-    public dp
+    public dp, PrintToFile, PrintReal, Print2ColReal, PrintInteger!, PrintDoubleToFile
+
+    contains
+
+    !subroutine PrintDoubleToFile(filename,doubleValue)
+    !    real(dp), intent(in) :: doubleValue
+    !    character(len=64), intent(in) :: filename
+    !
+    !    logical :: exists
+    !    integer :: i
+    !
+    !    inquire(file=filename, EXIST=exists)
+    !    if(exists) then
+    !        open(UNIT=77,FILE=filename, status='old')
+    !    else
+    !        open(UNIT=77,FILE=filename, status='new')
+    !    end if
+    !
+    !    write (77, 21) i,doubleValue
+    !
+    !    close(77)
+    !
+    !21  format(I8,',', 1X, F35.10)
+    !end subroutine PrintDoubleToFile
+
+    subroutine PrintToFile(filename,values,L,U)
+        real(dp), dimension(:), intent(in) :: values
+        integer, intent(in) :: L,U
+        character(len=64), intent(in) :: filename
+        real(dp) :: realval
+
+        logical :: exists
+        integer :: i
+
+        exists=.false.
+        inquire(file=filename, EXIST=exists)
+        if(exists) then
+            open(UNIT=77,FILE=filename, status='old')
+        else
+            open(UNIT=77,FILE=filename, status='new')
+        end if
+
+        i=0
+        realval=0.0_dp
+        do i=L,U
+            realval=values(i-L+1)
+            write (77, 21) i,realval
+        end do
+        close(77)
+
+    21  format(I8,',', 1X, F20.10)
+    end subroutine PrintToFile
+
+    subroutine PrintReal(filename,values,L,U)
+        real(dp), dimension(:), intent(in) :: values
+        integer, intent(in) :: L,U
+        character(len=64), intent(in) :: filename
+
+        real(dp) :: realval
+        logical :: exists
+        integer :: i
+
+        exists=.false.
+        inquire(file=filename, EXIST=exists)
+        if(exists) then
+            open(UNIT=77,FILE=filename, status='old')
+        else
+            open(UNIT=77,FILE=filename, status='new')
+        end if
+
+
+        i=0
+        realval=0.0_dp
+        do i=L,U
+            realval=values(i-L+1)
+            write (77, 21) i,realval
+        end do
+        close(77)
+
+    21  format(I8,',', 1X, F65.10)
+    end subroutine PrintReal
+
+    subroutine Print2ColReal(filename,values1,values2, L,U)
+        real(dp), dimension(:), intent(in) :: values1, values2
+        integer, intent(in) :: L, U
+        character(len=64), intent(in) :: filename
+
+        real(dp) :: realval1, realval2
+        logical :: exists
+        integer :: i
+
+        exists=.false.
+        inquire(file=filename, EXIST=exists)
+        if(exists) then
+            open(UNIT=77,FILE=filename, status='old')
+        else
+            open(UNIT=77,FILE=filename, status='new')
+        end if
+
+
+        i=0
+        realval1=0.0_dp
+        realval2=0.0_dp
+        do i=L,U
+            realval1=values1(i-L+1)
+            realval2=values2(i-L+1)
+            write (77, 21) realval1,realval2
+        end do
+        close(77)
+
+    21  format(F65.10, ',', 1X, F65.10)
+    end subroutine Print2ColReal
+
+
+    subroutine PrintInteger(filename,values,L,U)
+        integer, dimension(:), intent(in) :: values
+        integer, intent(in) :: L,U
+        character(len=64), intent(in) :: filename
+
+        logical :: exists
+        integer :: i
+
+        inquire(file=filename, EXIST=exists)
+        if(exists) then
+            open(UNIT=77,FILE=filename, status='old')
+        else
+            open(UNIT=77,FILE=filename, status='new')
+        end if
+
+        do i=L,U
+            write (77, 21) i,values(i-L+1)
+        end do
+        close(77)
+
+    21  format(I8,',',I20)
+    end subroutine PrintInteger
 end module utils
 
 module rng !Based on example at http://jblevins.org/log/openmp

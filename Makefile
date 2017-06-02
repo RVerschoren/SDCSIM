@@ -1,30 +1,45 @@
 FC = gfortran
 FFLAGS = -O2 -fopenmp -std=f2008 -fall-intrinsics -fcheck=bounds -fcheck=all
 
+CC = g++
+CFLAGS = -O2 -std=c++11
+
+HCWFUTIL = utils.o gca.o hcwfsim.o
+DWFUTIL = utils.o gca.o dwfsim.o
+
 DWFEXEC = SimDWF.exe
-DWFOBJS =  utils.o sim.o SimDWF.o
+DWFOBJS =  $(DWFUTIL) SimDWF.o
 
 HCWFEXEC = SimHCWF.exe
-HCWFOBJS =  utils.o sim.o SimHCWF.o
+HCWFOBJS =  $(HCWFUTIL) SimHCWF.o
 
 DWFTRACEEXEC = SimDWFTrace.exe
-DWFTRACEOBJS =  utils.o sim.o SimDWFTrace.o
+DWFTRACEOBJS =  $(DWFUTIL) SimDWFTrace.o
 
 COLDTRACEEXEC = SimCOLDTrace.exe
-COLDTRACEOBJS =  utils.o sim.o SimCOLDTrace.o
-
+COLDTRACEOBJS =  $(HCWFUTIL) SimCOLDTrace.o
 
 HCWFTRACEEXEC = SimHCWFTrace.exe
-HCWFTRACEOBJS =  utils.o sim.o SimHCWFTrace.o
+HCWFTRACEOBJS =  $(HCWFUTIL) SimHCWFTrace.o
+
+ORACLETRACEEXEC = SimORACLETrace.exe
+ORACLETRACEOBJS = $(HCWFUTIL) SimHCORACLETrace.o
+
+PREPROCTRACEEXEC = oracle.exe
+PREPROCTRACEOBJS =  oracle.o
+
 
 
 .PHONY: all
-all: $(HCWFEXEC) $(DWFEXEC) $(DWFTRACEEXEC) $(HCWFTRACEEXEC) $(COLDTRACEEXEC)
+all: $(HCWFEXEC) $(DWFEXEC) $(DWFTRACEEXEC) $(HCWFTRACEEXEC) $(COLDTRACEEXEC) $(ORACLETRACEEXEC) $(PREPROCTRACEEXEC)
 
-.SUFFIXES: .f90 .f08 .o .mod
+.SUFFIXES: .f90 .o .mod .cxx
 
 .f90.o:
 	$(FC) $(FFLAGS) -c $<
+
+.cxx.o:
+	$(CC) $(CFLAGS) -c $<
 
 $(DWFEXEC): $(DWFOBJS)
 	$(FC) $(FFLAGS) $(DWFOBJS) -o $@
@@ -40,6 +55,12 @@ $(HCWFTRACEEXEC): $(HCWFTRACEOBJS)
 	
 $(COLDTRACEEXEC): $(COLDTRACEOBJS)
 	$(FC) $(FFLAGS) $(COLDTRACEOBJS) -o $@
+
+$(ORACLETRACEEXEC): $(ORACLETRACEOBJS)
+	$(FC) $(FFLAGS) $(ORACLETRACEOBJS) -o $@
+
+$(PREPROCTRACEEXEC): $(PREPROCTRACEOBJS)
+	$(CC) $(CFLAGS) $(PREPROCTRACEOBJS) -o $@
 
 .PHONY: clean
 clean:
