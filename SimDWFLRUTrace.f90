@@ -1,262 +1,4 @@
-module dwfsim
-    use utils, only: dp,PrintInteger, PrintToFile, PrintReal, Print2ColReal
-    use gca, only : GC
-    use dwfutils, only : initDWFrandom, processGCDWF
-    implicit none
-
-    !private 
-    public  SSDDWF, SSDDWFTrace!Runs
-
-    contains
-
-    subroutine SSDDWF(N,b,d,rho,r,f,maxPE,runit, rng, initempty,initrandom)
-        use rng, only: rng_t, randi, rng_uniform
-
-        integer, parameter :: hotsections=1000, testhotnesscount = 1000, hotValue=1, coldValue=2
-        type(rng_t), intent(inout) :: rng
-        integer, intent(in):: N,b,d,maxPE,runit
-        real(dp), intent(in) :: rho,r,f
-        logical, intent(in), optional :: initempty,initrandom
-        real(dp), allocatable, dimension(:) :: dist
-        real(dp), dimension(0:maxPE) :: endurance, fairness
-        real(dp), dimension(0:b) :: validdist
-        integer(8), dimension(0:b*(b+1)) :: victimhotness, transientdist
-
-        integer :: WFI,WFE,prevWFI,p,bl,it,hotness,i,j,jst,k,lpn,victim,maxnumvalid,kdiff,&
-                    distL, distU,distit,maxit,temphot,temphotindex,intW, extW,&
-                    gcwrites,gccalls,numgccalls,currentPE,sumPE,testhotnessinterval,bi,bj
-        integer, dimension(1:b,1:N)::SSD
-        integer, dimension(1:N):: validPages, PE,hotValidPages
-        integer, dimension(1:b) :: victimcontent
-        integer, dimension(1:2) :: maxnumhot
-        integer, dimension(0:b) :: WFEhotness,WFIhotness,victimValids
-        integer, allocatable, dimension(:,:):: FTL
-        character(len=64) :: distfilename,endufilename, fairfilename,&
-                        validfilename,WFEhfilename,WFIhfilename,victimfilename, &
-                        victimhotfilename,transientdistfilename,WAfilename
-        
-        real(dp) :: pageCount, rannr, WA
-        logical :: failure
-
-        maxit=N*maxPE
-        pageCount=dble(b*N)
-        maxnumvalid=ceiling(rho*pageCount)
-        testhotnessinterval=maxit/testhotnesscount
-
-        !! Initialize
-        allocate(FTL(1:maxnumvalid,1:2))
-
-        SSD=0
-        FTL=0
-        WFI=1
-        WFE=2
-        if( present(initrandom) .and. initrandom) then
-            call initDWFrandom(N,b,SSD,FTL,maxnumvalid,WFE,WFI,rng)
-        end if
-        maxnumhot(hotValue)=floor(f*rho*pageCount)
-        maxnumhot(coldValue)=maxnumvalid-maxnumhot(1)
-        validPages = count(SSD > 0, 1)
-        hotValidPages = count(0 < SSD .and. SSD <= maxnumhot(hotValue), 1)
-
-
-        !! Simulation
-        it=0
-        currentPE=0
-        intW=0
-        extW=0
-        PE=0
-        sumPE=sum(PE)
-        fairness=0.0_dp
-        endurance=0.0_dp
-        WFEhotness =0
-        WFIhotness =0
-        victimValids=0
-        numgccalls =0
-        victimhotness=0
-        transientdist=0
-
-        do while(currentPE < maxPE .or. it <= maxit)
-            do while(validPages(WFE) < b)
-                rannr=rng_uniform(rng)
-                if(rannr < r) then
-                    hotness=hotValue
-                else
-                    hotness=coldValue
-                end if
-
-                failure=.true.
-                do while (failure)
-                    if(hotness == hotValue) then
-                        lpn=randi(rng,maxnumhot(1))
-                    else
-                        lpn=maxnumhot(1)+randi(rng,maxnumhot(2))
-                    end if
-                    !lpn=sum(maxnumhot(1:hotness-1))+randi(rng,maxnumhot(hotness))
-                    p=FTL(lpn,1)
-                    bl=FTL(lpn,2)
-
-                    if(p /= 0) then !Choose valid page
-                        if(bl /= WFE .and. bl /= WFI) then
-                            !Remove old page
-                            SSD(p,bl) = 0
-                            validPages(bl)=validPages(bl)-1
-                            !Write update to victim
-                            validPages(WFE)=validPages(WFE)+1
-                            FTL(lpn, 1:2) =(/validPages(WFE), WFE/)
-                            SSD(validPages(WFE),WFE)=lpn
-                            if(hotness == hotValue) then
-                                hotValidPages(bl)=hotValidPages(bl)-1
-                                hotValidPages(WFE)=hotValidPages(WFE)+1
-                            end if
-                            failure=.false.
-                        end if
-                    else ! Write to empty logical page
-                        validPages(WFE)=validPages(WFE)+1
-                        FTL(lpn, 1:2) =(/ validPages(WFE), WFE/)
-                        SSD(validPages(WFE),WFE)=lpn
-                        if(hotness == hotValue) then
-                            hotValidPages(WFE)=hotValidPages(WFE)+1
-                        end if
-                        failure=.false.
-                    end if
-                end do !(failure)
-
-                extW=extW+1
-            end do !(WFEvalid < b)
-
-            !! GCA invocation
-            gccalls=0
-            gcwrites=0
-            failure=.true.
-
-            do while(failure)
-                validPages((/WFE,WFI/))=b+1
-                victim=GC(rng,d,N,validPages)
-                validPages((/WFE,WFI/))=count(SSD(:,(/WFE,WFI/)) > 0, 1)
-
-                if(victim /= WFE .and. victim /= WFI) then
-                    if(mod(it, testhotnessinterval) == 0) then
-                        do distit=1,N
-                            bi=hotValidPages(distit)
-                            bj=validPages(distit)
-                            temphotindex=bj*b+bi
-                            transientdist(temphotindex)=transientdist(temphotindex)+1
-                        end do
-                    end if
-
-                    if(PE(victim) == currentPE .and. currentPE < maxPE) then
-                        currentPE=currentPE+1
-                        fairness(currentPE)=sum(PE)/dble(N*currentPE)
-                        endurance(currentPE)=dble(extW)/pageCount
-                    end if
-                    it=it+1
-
-
-                    if (it == maxit) then
-                        !! Stats at end of run
-                        distL=minval(PE)
-                        distU=maxval(PE)
-                        allocate(dist(distL:distU))
-                        dist(distL)=count(PE==distL)
-                        do distit=distL+1,distU
-                            dist(distit)=dist(distit-1)+count(PE == distit)
-                        end do
-                        dist=dist/N
-
-                        do distit=0,b
-                            validdist(distit)=count(validPages == distit)
-                        end do
-                        validdist=validdist/N
-
-
-                        do distit=1,N
-                            bi=hotValidPages(distit)
-                            bj=validPages(distit)
-                            temphotindex=bj*b+bi
-                            transientdist(temphotindex)=transientdist(temphotindex)+1
-                        end do
-
-                        it=maxit+1 !make sure this does not happen again
-                    end if !(it == maxit)
-
-
-                    j=validPages(victim)
-                    victimValids(j)=victimValids(j)+1
-
-                    bi=hotValidPages(victim)
-                    bj=validPages(victim)
-                    temphotindex=bj*b+bi
-                    if(it < maxit) then
-                        victimhotness(temphotindex)=victimhotness(temphotindex)+1
-                    end if
-
-                    !jst=validPages(WFI)
-                    gccalls=gccalls+1
-                    gcwrites=gcwrites+b-j
-
-                    prevWFI=WFI
-                    failure=processGCDWF(N,b,SSD,FTL,maxnumvalid,maxnumhot,&
-                        validPages,hotValidPages,victim,WFE,WFI)
-                    if(failure) then !Reselected WFI
-                        temphot=count(0 < SSD(1:b,prevWFI) .and. SSD(1:b,prevWFI) <= maxnumhot(hotValue))
-                        WFIhotness(temphot)=WFIhotness(temphot)+1
-                    end if !(failure)
-                    !! PE cycle on victim
-                    PE(victim)=PE(victim)+1
-                    sumPE=sumPE+1
-
-                end if !(victim /= WFE,WFI)
-            end do !(failure)
-            temphot=count(0 < SSD(1:b,WFE) .and. SSD(1:b,WFE) <= maxnumhot(hotValue))
-            WFEhotness(temphot)=WFEhotness(temphot)+1
-            hotValidPages(WFE)=temphot
-            WFE=victim
-            hotValidPages(WFE)=count(0 < SSD(1:b,WFE) .and. SSD(1:b,WFE) <= maxnumhot(hotValue))
-
-            intW=intW+gcwrites!(b-validPages(WFE))
-            numgccalls=numgccalls+gccalls
-
-
-        end do !(currentPE < maxPE .or. it < maxit)
-        WA=dble(intW)/numgccalls
-        WA=dble(b)/WA
-
-        write (WAfilename, 21)           b,d,rho,r,f,runit
-        write (distfilename, 22)         b,d,rho,r,f,runit
-        write (fairfilename, 23)         b,d,rho,r,f,runit
-        write (endufilename, 24)         b,d,rho,r,f,runit
-        write (victimfilename, 25)       b,d,rho,r,f,runit
-        write (victimhotfilename, 26)    b,d,rho,r,f,runit
-        write (WFEhfilename, 27)         b,d,rho,r,f,runit
-        write (WFIhfilename, 28)         b,d,rho,r,f,runit
-        write (transientdistfilename,30) b,d,rho,r,f,runit
-        write (validfilename,31)         b,d,rho,r,f,runit
-
-        call PrintToFile  (WAfilename,  (/WA/),    0, 0)
-        call PrintToFile (distfilename,  dist, distL, distU)
-        call PrintToFile (fairfilename,  fairness, 0, maxPE)
-        call PrintToFile (endufilename,  endurance, 0, maxPE)
-        call PrintInteger(victimfilename,  victimValids, 0, b)
-        call PrintReal   (victimhotfilename,  victimhotness/dble(maxit), 0, b*(b+1))
-        call PrintInteger(WFEhfilename,  WFEhotness, 0, b)
-        call PrintInteger(WFIhfilename,  WFIhotness, 0, b)
-        call PrintReal   (transientdistfilename, transientdist/(testhotnesscount+1.0_dp), 0,b*(b+1))
-        call PrintReal   (validfilename, validdist, 0,b)
-
-        21  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-WA.',I2,'.csv')
-        22  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-dist.',I2,'.csv')
-        23  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-fair.',I2,'.csv')
-        24  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-end.',I2,'.csv')
-        25  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-victim.',I2,'.csv')
-        26  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-victimh.',I2,'.csv')
-        27  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-WFEh.',I2,'.csv')
-        28  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-WFIh.',I2,'.csv')
-        30  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-trans.',I2,'.csv')
-        31  format('dwf-b',I2,'-d',I3,'-rho',F4.2,'-r',F5.3,'-f',F5.3,'-valid.',I2,'.csv')
-    end subroutine SSDDWF
-
-
-    subroutine SSDDWFTrace(traceid,maxLBA, b,d,rho,f,maxPE,numreq,requests,runit,rng, initrandom)
+subroutine SSDDWFTrace(traceid,maxLBA, b,d,rho,f,maxPE,numreq,requests,runit,rng, initrandom)
         use rng, only: rng_t, randi, rng_uniform
 
         integer, parameter :: hotsections=1000, testhotnesscount = 1000
@@ -316,7 +58,20 @@ module dwfsim
         validPages=0
 
         if( present(initrandom) .and. initrandom) then
-            call initDWFrandom(N,b,SSD,FTL,maxnumvalid,WFE,WFI,rng)
+            do it=1, maxnumvalid
+                failure=.true.
+                do while(failure)
+                    p =randi(rng, b)
+                    bl=randi(rng, N)
+
+                    if(SSD(p,bl) <= 0 .and. bl /= WFE .and. bl /= WFI) then
+                        SSD(p,bl) = it
+                        FTL(it,1)=p
+                        FTL(it,2)=bl
+                        failure=.false.
+                    end if
+                end do
+            end do
             validPages = count(SSD > 0, 1)
             hotValidPages = count(0 < SSD .and. SSD <= maxnumhot,1)
         else
@@ -691,6 +446,80 @@ module dwfsim
         50  format('dwftrace-empty-b',I2,'-d',I3,'-rho',F4.2,'-f',F6.4,'-',A4,'-rhoeff.',I2,'.csv')
     end subroutine SSDDWFTrace
 
+    subroutine SSDDWFTraceRuns(traceid,startrun,nruns,b,d,rho,f,maxPE,numreq, requests, initrandom)
+            use utils, only : dp
+            use rng, only : rng_seed, rng_t
+
+            integer, intent(in) :: nruns,b,d,maxPE, numreq, startrun
+            character(4), intent(in):: traceid
+            real(dp), intent(in) :: rho,f
+            logical, intent(in) :: initrandom
+            integer, dimension(1:numreq,1:2), intent(in):: requests
+
+            integer :: it, maxLBA
+            type(rng_t), dimension(1:nruns) :: rng
+
+            maxLBA=maxval(requests)
+            print *, maxLBA, ceiling(dble(maxLBA)/(b*rho))
+
+            !!$OMP PARALLEL DO
+            do it=1,nruns
+                print *, it + startrun-1
+                call rng_seed(rng(it), 932117 + it + startrun-1)
+                call SSDDWFTrace(traceid, maxLBA, b,d,rho,f,maxPE,numreq,requests,it +startrun-1,rng(it), initrandom)
+                print *, "done ", it + startrun-1
+            end do
+            !!$OMP END PARALLEL DO
+    end subroutine SSDDWFTraceRuns
+end module SimDWFLRUMod
 
 
-end module dw
+program SimDWFLRUTrace
+
+    use SimDWFLRUMod, only : dp
+    use sim, only : SSDDWFTraceRuns
+    implicit none
+
+    integer, parameter :: H=2
+    integer :: b,d,maxPE,nruns,numreq,it, startrun
+    real(dp) :: rho,f
+    integer, dimension(:,:), allocatable :: requests
+    logical :: exists, initrandom
+    character(len=32) :: arg
+    character(len=4) :: traceid
+
+    call get_command_argument(1, arg)
+    read (arg, *) b
+    call get_command_argument(2, arg)
+    read (arg, *) d
+    call get_command_argument(3, arg)
+    read (arg, *) rho
+    call get_command_argument(4, arg)
+    read (arg, *) f
+    call get_command_argument(5, arg)
+    read (arg, *) startrun
+    call get_command_argument(6, arg)
+    read (arg, *) nruns
+    call get_command_argument(7, arg)
+    read (arg, *) maxPE
+    call get_command_argument(8, arg)
+    read (arg, *) numreq
+    call get_command_argument(10, arg)
+    read (arg, *) initrandom
+    call get_command_argument(9, arg)
+    traceid=arg(1:4) ! First 4 letters of trace filename as trace "ID"
+
+    inquire(file=arg, EXIST=exists)
+    if(exists) then
+        allocate(requests(1:numreq,1:2))
+        open(99, file=arg, status='old', action='read')
+        do it = 1,numreq
+            read(99,*) requests(it,:)
+        end do
+        call SSDDWFTraceRuns(traceid,startrun,nruns,b,d,rho,f,maxPE,numreq, requests, initrandom)
+        deallocate(requests)
+    else
+        stop 'Input file does not exist.'
+    end if
+
+end program SimDWFLRUTrace

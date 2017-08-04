@@ -14,7 +14,7 @@ program SimDWF
 
 
     !! Separate command line arguments
-    ! b, d, rho, f, r, startrun, nruns, N, maxPE
+    ! b, d, rho, f, r, startrun, nruns, N, maxPE, initrandom
     call get_command_argument(1, arg)
     read (arg, *) b
     call get_command_argument(2, arg)

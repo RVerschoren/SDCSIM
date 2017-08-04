@@ -46,8 +46,8 @@ condor_submit <(
     echo "Job_Machine_Attrs_History_Length = 1"
     #echo "JobBatchName = \"$tracefile\""
 
-    #echo "Notification = Error"
-    echo "Notification = Always"
+    echo "Notification = Error"
+    #echo "Notification = Always"
     echo "Notify_User  = robin.verschoren@mosaic.uantwerpen.be"
 
     while read -r textline
@@ -61,7 +61,7 @@ condor_submit <(
         echo "Log                   = $dashtl.oracle.log"
         echo "Output                = $dashtl.oracle.out"
         echo "Queue"
-    done < paramshcwforacle.csv
+    done < paramsoracletrace.csv
 ) >/dev/null
 
 exit 0

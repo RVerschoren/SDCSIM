@@ -1,7 +1,7 @@
 program SimDWFTrace
 
     use utils, only : dp
-    use dwfsim, only : SSDDWFTraceRuns
+    use dwfsim, only : SSDDWFTrace!Runs
     implicit none
 
     integer, parameter :: H=2
@@ -45,5 +45,33 @@ program SimDWFTrace
     else
         stop 'Input file does not exist.'
     end if
+
+    contains
+
+    subroutine SSDDWFTraceRuns(traceid,startrun,nruns,b,d,rho,f,maxPE,numreq, requests, initrandom)
+        !use utils, only : dp
+        use rng, only : rng_seed, rng_t
+
+        integer, intent(in) :: nruns,b,d,maxPE, numreq, startrun
+        character(4), intent(in):: traceid
+        real(dp), intent(in) :: rho,f
+        logical, intent(in) :: initrandom
+        integer, dimension(1:numreq,1:2), intent(in):: requests
+
+        integer :: it, maxLBA
+        type(rng_t), dimension(1:nruns) :: rng
+
+        maxLBA=maxval(requests)
+        print *, maxLBA, ceiling(dble(maxLBA)/(b*rho))
+
+        !!$OMP PARALLEL DO
+        do it=1,nruns
+            print *, it + startrun-1
+            call rng_seed(rng(it), 932117 + it + startrun-1)
+            call SSDDWFTrace(traceid, maxLBA, b,d,rho,f,maxPE,numreq,requests,it +startrun-1,rng(it), initrandom)
+            print *, "done ", it + startrun-1
+        end do
+        !!$OMP END PARALLEL DO
+    end subroutine SSDDWFTraceRuns
 
 end program SimDWFTrace

@@ -1,7 +1,7 @@
-program SimHCWF
+program SimCOLD
 
     use utils, only : dp
-    use hcwfsim, only : SSDHCWF
+    use hcwfsim, only : SSDHCWFCOLD
     implicit none
 
     integer :: stat,b,d,N,maxPE,nruns,startrun
@@ -32,11 +32,11 @@ program SimHCWF
     call get_command_argument(10, arg)
     read (arg, *) initrandom
 
-    call SSDHCWFRuns(nruns,startrun, N,b,d,rho,r,f,maxPE, initrandom)
+    call SSDHCWFCOLDRuns(nruns,startrun, N,b,d,rho,r,f,maxPE, initrandom)
 
     contains
 
-    subroutine SSDHCWFRuns(nruns,startrun,N,b,d,rho,r,f,maxPE, initrandom)
+    subroutine SSDHCWFCOLDRuns(nruns,startrun,N,b,d,rho,r,f,maxPE, initrandom)
         use rng, only : rng_seed, rng_t
 
         integer, intent(in) :: nruns,b,N,d,maxPE,startrun
@@ -49,9 +49,9 @@ program SimHCWF
         do it=1,nruns
             print *, it + startrun-1
             call rng_seed(prng(it), 932117 + it + startrun-1)
-            call SSDHCWF(N,b,d,rho,r,f,maxPE,it+startrun-1, prng(it), initrandom)
+            call SSDHCWFCOLD(N,b,d,rho,r,f,maxPE,it+startrun-1, prng(it), initrandom)
             print *, "done ", it + startrun -1
         end do
-    end subroutine SSDHCWFRuns
+    end subroutine SSDHCWFCOLDRuns
 
-end program SimHCWF
+end program SimCOLD

@@ -43,8 +43,8 @@ condor_submit <(
     echo "Job_Machine_Attrs                = KFlops,Memory,Mips"
     echo "Job_Machine_Attrs_History_Length = 1"
 
-    #echo "Notification = Error"
-    echo "Notification = Always"
+    echo "Notification = Error"
+    #echo "Notification = Always"
     echo "Notify_User  = robin.verschoren@mosaic.uantwerpen.be"
 
     while read -r textline
@@ -84,8 +84,8 @@ condor_submit <(
     echo "Job_Machine_Attrs                = KFlops,Memory,Mips"
     echo "Job_Machine_Attrs_History_Length = 1"
 
-    #echo "Notification = Error"
-    echo "Notification = Always"
+    echo "Notification = Error"
+    #echo "Notification = Always"
     echo "Notify_User  = robin.verschoren@mosaic.uantwerpen.be"
 
     while read -r textline
@@ -124,8 +124,8 @@ condor_submit <(
     echo "Job_Machine_Attrs                = KFlops,Memory,Mips"
     echo "Job_Machine_Attrs_History_Length = 1"
 
-    #echo "Notification = Error"
-    echo "Notification = Always"
+    echo "Notification = Error"
+    #echo "Notification = Always"
     echo "Notify_User  = robin.verschoren@mosaic.uantwerpen.be"
 
     while read -r textline
@@ -142,5 +142,45 @@ condor_submit <(
     done < paramsoracle.csv
 ) >/dev/null
 
+
+tracefile="4Kjedec.csv"
+traceid="4Kje"
+echo "Submitting traces in $tracefile..."
+nreq=$(wc -l $tracefile | cut -f1 --delimiter=" ")
+echo $nreq
+
+#Submit a job for each line
+condor_submit <(
+    echo "Description =\"ORACLE$tracefile\""
+    echo "Requirements                     = TARGET.Arch             == \"X86_64\" \\"
+    echo "                                && TARGET.FileSystemDomain == \"controller.mosaic.uantwerpen.be\""
+    echo "Rank                             = TARGET.KFlops"
+    echo "Request_Memory                   = 2048 Mb"
+
+    echo "Universe                         = Vanilla"
+    echo "Getenv                           = True"
+    echo "Executable                       = /mnt/condor/rverschoren/oracle.exe"
+    echo "Should_Transfer_Files            = No"
+
+    echo "Job_Machine_Attrs                = KFlops,Memory,Mips"
+    echo "Job_Machine_Attrs_History_Length = 1"
+
+    echo "Notification = Error"
+    #echo "Notification = Always"
+    echo "Notify_User  = robin.verschoren@mosaic.uantwerpen.be"
+
+    while read -r textline
+    do
+        tl=$(echo $textline | sed -e 's@$linecount@'$nreq'@' | sed -e 's@$trace@'$tracefile'@' | sed -e 's@$traceid@'$traceid'@')
+        dashtl=$(echo $textline | sed 's@ @-@g')
+        #base_name="${ini_file%.*}"
+        #escaped_path="${submit_dir// /\\ }/${student_dir// /\\ }/${base_name// /\\ }"
+
+        echo "Arguments             = \"$tl\""
+        echo "Log                   = $dashtl.oracle.log"
+        echo "Output                = $dashtl.oracle.out"
+        echo "Queue"
+    done < paramsoracle.csv
+) >/dev/null
 
 exit 0

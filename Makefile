@@ -4,14 +4,17 @@ FFLAGS = -O2 -fopenmp -std=f2008 -fall-intrinsics -fcheck=bounds -fcheck=all
 CC = g++
 CFLAGS = -O2 -std=c++11
 
-HCWFUTIL = utils.o gca.o hcwfsim.o
-DWFUTIL = utils.o gca.o dwfsim.o
+HCWFUTIL = utils.o gca.o hcwfutils.o hcwfsim.o
+DWFUTIL = utils.o gca.o dwfutils.o dwfsim.o
 
 DWFEXEC = SimDWF.exe
 DWFOBJS =  $(DWFUTIL) SimDWF.o
 
 HCWFEXEC = SimHCWF.exe
 HCWFOBJS =  $(HCWFUTIL) SimHCWF.o
+
+COLDEXEC = SimCOLD.exe
+COLDOBJS =  $(HCWFUTIL) SimCOLD.o
 
 DWFTRACEEXEC = SimDWFTrace.exe
 DWFTRACEOBJS =  $(DWFUTIL) SimDWFTrace.o
@@ -31,7 +34,7 @@ PREPROCTRACEOBJS =  oracle.o
 
 
 .PHONY: all
-all: $(HCWFEXEC) $(DWFEXEC) $(DWFTRACEEXEC) $(HCWFTRACEEXEC) $(COLDTRACEEXEC) $(ORACLETRACEEXEC) $(PREPROCTRACEEXEC)
+all: $(HCWFEXEC) $(COLDEXEC) $(DWFEXEC) $(DWFTRACEEXEC) $(HCWFTRACEEXEC) $(COLDTRACEEXEC) $(ORACLETRACEEXEC) $(PREPROCTRACEEXEC)
 
 .SUFFIXES: .f90 .o .mod .cxx
 
@@ -49,6 +52,9 @@ $(DWFTRACEEXEC): $(DWFTRACEOBJS)
 
 $(HCWFEXEC): $(HCWFOBJS)
 	$(FC) $(FFLAGS) $(HCWFOBJS) -o $@
+
+$(COLDEXEC): $(COLDOBJS)
+	$(FC) $(FFLAGS) $(COLDOBJS) -o $@
 
 $(HCWFTRACEEXEC): $(HCWFTRACEOBJS)
 	$(FC) $(FFLAGS) $(HCWFTRACEOBJS) -o $@
